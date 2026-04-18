@@ -1,27 +1,32 @@
 /**
- * homebridge-skydimo
- * HomeKit plugin for Skydimo ambient monitor lights (macOS only).
+ * homebridge-skydimo (v2) — direct USB serial
  *
- * Because the Skydimo desktop app has no public API, this plugin drives it
- * via macOS UI automation (AppleScript / osascript). The Skydimo app must be
- * running on the same Mac as Homebridge.
+ * Talks to Skydimo LED controllers directly over USB using the Adalight
+ * protocol (as documented in Skydimo's own OpenRGB source:
+ * https://gitlab.com/skydimo-team/skydimo-open-rgb).
+ *
+ * Because the controller holds the serial port exclusively, the Skydimo
+ * desktop app must NOT be running while this plugin is active. In exchange
+ * you get silent, instant HomeKit control with no UI automation — at the
+ * cost of the app's screen-sync feature.
+ *
+ * Adalight frame:
+ *   0x41 0x64 0x61 0x00  (ASCII "Ada\0" — magic header)
+ *   0xHH 0xLL            (LED count, big-endian)
+ *   [R G B] × LED count  (colour bytes per LED)
+ *
+ * At 115200 baud, one frame for 71 LEDs = ~21 ms transmit time.
  */
 
-const { exec } = require("child_process");
+const { SerialPort } = require("serialport");
 
-/** Run an AppleScript snippet via osascript. */
-function run(script) {
-  return new Promise((resolve, reject) => {
-    exec(`osascript -e ${JSON.stringify(script)}`, (err, stdout, stderr) => {
-      if (err) return reject(new Error((stderr || err.message).trim()));
-      resolve(stdout.trim());
-    });
-  });
-}
+// ──────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Convert HomeKit HSV (hue 0-360, sat 0-100, val 0-100) to RGB 0-255. */
+/** Convert HomeKit HSV (0-360, 0-100, 0-100) to RGB 0-255. */
 function hsvToRgb(h, s, v) {
   s = s / 100;
   v = v / 100;
@@ -42,13 +47,15 @@ function hsvToRgb(h, s, v) {
   ];
 }
 
-/** Convert RGB 0-255 to uppercase 6-char hex. */
-function rgbToHex(r, g, b) {
-  return ((r << 16) | (g << 8) | b)
-    .toString(16)
-    .toUpperCase()
-    .padStart(6, "0");
+/** Scale an RGB triplet by brightness 0-100. */
+function scaleBrightness([r, g, b], brightness) {
+  const f = Math.max(0, Math.min(100, brightness)) / 100;
+  return [Math.round(r * f), Math.round(g * f), Math.round(b * f)];
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plugin entry
+// ──────────────────────────────────────────────────────────────────────────
 
 module.exports = (api) => {
   api.registerAccessory("SkydimoLight", SkydimoLight);
@@ -59,18 +66,25 @@ class SkydimoLight {
     this.log = log;
     this.name = config.name || "Monitor Lights";
 
-    // Cached state (HomeKit will poll these via onGet)
-    this.on = true;
-    this.brightness = 90;
+    // User-configurable options
+    this.portPath = config.portPath || null; // auto-detect if not set
+    this.baudRate = config.baudRate || 115200;
+    this.numLeds = config.numLeds || 71;     // SK0134 default; override in config for other models
+    this.keepAliveMs = config.keepAliveMs || 250;
+
+    // HomeKit state
+    this.on = false;
+    this.brightness = 80;
     this.hue = 24;
     this.saturation = 90;
 
-    // Internal debounce / mutex
+    // Serial & write state
+    this.port = null;
+    this.portReady = false;
+    this.keepAliveTimer = null;
     this.colorTimer = null;
-    this.busy = false;
-    this.pending = false;
-    this.rgbSlidersReady = false;
 
+    // Register HomeKit characteristics
     const { Service, Characteristic } = api.hap;
 
     this.lightService = new Service.Lightbulb(this.name);
@@ -78,25 +92,17 @@ class SkydimoLight {
     this.lightService
       .getCharacteristic(Characteristic.On)
       .onGet(() => this.on)
-      .onSet(async (v) => {
-        this.on = v;
-        try {
-          await this.setPower(v);
-        } catch (e) {
-          this.log.error("Power:", e.message);
-        }
+      .onSet((v) => {
+        this.on = !!v;
+        this.pushState();
       });
 
     this.lightService
       .getCharacteristic(Characteristic.Brightness)
       .onGet(() => this.brightness)
-      .onSet(async (v) => {
+      .onSet((v) => {
         this.brightness = v;
-        try {
-          await this.setBrightness(v);
-        } catch (e) {
-          this.log.error("Brightness:", e.message);
-        }
+        this.pushState();
       });
 
     this.lightService
@@ -104,7 +110,7 @@ class SkydimoLight {
       .onGet(() => this.hue)
       .onSet((v) => {
         this.hue = v;
-        this.scheduleColorUpdate();
+        this.debouncedPush();
       });
 
     this.lightService
@@ -112,184 +118,155 @@ class SkydimoLight {
       .onGet(() => this.saturation)
       .onSet((v) => {
         this.saturation = v;
-        this.scheduleColorUpdate();
+        this.debouncedPush();
       });
 
     this.infoService = new Service.AccessoryInformation()
       .setCharacteristic(Characteristic.Manufacturer, "Skydimo")
-      .setCharacteristic(Characteristic.Model, "Ambient Light (Hex)")
-      .setCharacteristic(Characteristic.SerialNumber, "SKYDIMO-001");
+      .setCharacteristic(Characteristic.Model, "LED Strip (Adalight direct)")
+      .setCharacteristic(Characteristic.SerialNumber, "SKYDIMO-DIRECT");
+
+    // Start connecting asynchronously — don't block accessory registration
+    this.connect();
   }
 
-  /** Home app sends Hue and Saturation as separate events — debounce so we
-   *  apply the combined colour once both have settled. */
-  scheduleColorUpdate() {
-    if (this.colorTimer) clearTimeout(this.colorTimer);
-    this.colorTimer = setTimeout(() => this.runColorUpdate(), 400);
+  // ────────────────────────────────────────────────────────────────────────
+  // Port discovery & lifecycle
+  // ────────────────────────────────────────────────────────────────────────
+
+  async findPort() {
+    if (this.portPath) return this.portPath;
+    try {
+      const ports = await SerialPort.list();
+      // Look for usbserial-* (CH340 etc.) — Skydimo uses generic USB-serial chips
+      const candidate = ports.find(
+        (p) =>
+          /usbserial|wchusbserial|cu\.usbserial/i.test(p.path) ||
+          /Silicon Labs|FTDI|QinHeng|CH340/i.test(
+            `${p.manufacturer || ""} ${p.vendorId || ""}`
+          )
+      );
+      if (candidate) {
+        this.log(`Auto-detected serial port: ${candidate.path}`);
+        return candidate.path;
+      }
+    } catch (e) {
+      this.log.error("Port enumeration failed:", e.message);
+    }
+    return null;
   }
 
-  async runColorUpdate() {
-    if (this.busy) {
-      this.pending = true;
+  async connect() {
+    const path = await this.findPort();
+    if (!path) {
+      this.log.warn(
+        "No USB serial port found. Plug in the Skydimo controller and make sure the Skydimo desktop app is NOT running. Retrying in 10s..."
+      );
+      setTimeout(() => this.connect(), 10000);
       return;
     }
-    this.busy = true;
+
     try {
-      await this.applyColor();
+      this.port = new SerialPort({
+        path,
+        baudRate: this.baudRate,
+        autoOpen: true,
+      });
+
+      this.port.on("open", () => {
+        this.portReady = true;
+        this.log(`Connected to Skydimo controller at ${path}`);
+        this.startKeepAlive();
+        // Push current state immediately so lights match HomeKit on startup
+        this.pushState();
+      });
+
+      this.port.on("error", (err) => {
+        this.log.error("Serial error:", err.message);
+      });
+
+      this.port.on("close", () => {
+        this.portReady = false;
+        this.stopKeepAlive();
+        this.log.warn("Serial port closed. Reconnecting in 5s...");
+        setTimeout(() => this.connect(), 5000);
+      });
     } catch (e) {
-      this.log.error("Color:", e.message);
-    } finally {
-      this.busy = false;
-      if (this.pending) {
-        this.pending = false;
-        this.runColorUpdate();
-      }
+      this.log.error("Failed to open serial port:", e.message);
+      this.portReady = false;
+      setTimeout(() => this.connect(), 10000);
     }
   }
 
-  async ensureSkydimoRunning() {
+  // ────────────────────────────────────────────────────────────────────────
+  // Frame building & sending
+  // ────────────────────────────────────────────────────────────────────────
+
+  /** Build an Adalight frame filling all LEDs with a single RGB colour. */
+  buildFrame([r, g, b]) {
+    const count = this.numLeds;
+    const frame = Buffer.alloc(6 + count * 3);
+    // "Ada\0" magic
+    frame[0] = 0x41;
+    frame[1] = 0x64;
+    frame[2] = 0x61;
+    frame[3] = 0x00;
+    // LED count (big-endian)
+    frame[4] = (count >> 8) & 0xff;
+    frame[5] = count & 0xff;
+    // RGB payload
+    for (let i = 0; i < count; i++) {
+      const off = 6 + i * 3;
+      frame[off] = r;
+      frame[off + 1] = g;
+      frame[off + 2] = b;
+    }
+    return frame;
+  }
+
+  currentColourRgb() {
+    if (!this.on) return [0, 0, 0];
+    const raw = hsvToRgb(this.hue, this.saturation, 100);
+    return scaleBrightness(raw, this.brightness);
+  }
+
+  pushState() {
+    if (!this.portReady || !this.port) return;
+    const rgb = this.currentColourRgb();
     try {
-      const running = await run(
-        'tell application "System Events" to return (exists process "Skydimo")'
-      );
-      if (running !== "true") {
-        await run('tell application "SkyDimo" to activate');
-        await sleep(1500);
-      }
+      this.port.write(this.buildFrame(rgb));
     } catch (e) {
-      /* ignore — will surface at next op */
+      this.log.error("Write failed:", e.message);
     }
   }
 
-  async colorsWindowExists() {
-    try {
-      const out = await run(
-        'tell application "System Events" to tell process "Skydimo" to return (exists window "Colors")'
-      );
-      return out === "true";
-    } catch {
-      return false;
+  /** Home app sends Hue and Saturation as separate events — coalesce. */
+  debouncedPush() {
+    if (this.colorTimer) clearTimeout(this.colorTimer);
+    this.colorTimer = setTimeout(() => this.pushState(), 50);
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Keep-alive: re-send every 250 ms so controller doesn't timeout
+  // ────────────────────────────────────────────────────────────────────────
+
+  startKeepAlive() {
+    this.stopKeepAlive();
+    this.keepAliveTimer = setInterval(() => {
+      this.pushState();
+    }, this.keepAliveMs);
+  }
+
+  stopKeepAlive() {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
     }
   }
 
-  async setPower(on) {
-    await this.ensureSkydimoRunning();
-    const btn = on ? "Turn on all" : "Turn off all";
-    await run(
-      `tell application "System Events" to tell process "Skydimo" to click button "${btn}" of window "Skydimo"`
-    );
-    this.log(`Power: ${on ? "ON" : "OFF"}`);
-  }
-
-  async setBrightness(level) {
-    await this.ensureSkydimoRunning();
-    await run(
-      `tell application "System Events" to tell process "Skydimo" to tell group 1 of window "Skydimo" to set value of slider 1 to ${level}`
-    );
-    this.log(`Brightness: ${level}%`);
-  }
-
-  /** Make sure the macOS colour picker is open and set to RGB Sliders mode,
-   *  where the hex text field is accessible. */
-  async ensurePickerAndRgbMode() {
-    if (!(await this.colorsWindowExists())) {
-      await run(
-        'tell application "System Events" to tell process "Skydimo" to click button "Pick color" of group 1 of window "Skydimo"'
-      );
-      for (let i = 0; i < 30; i++) {
-        await sleep(100);
-        if (await this.colorsWindowExists()) break;
-      }
-      this.rgbSlidersReady = false;
-    }
-
-    if (!this.rgbSlidersReady) {
-      try {
-        // Switch to "Color Sliders" tab (2nd toolbar button)
-        await run(
-          'tell application "System Events" to tell process "Skydimo" to tell window "Colors" to click button 2 of toolbar 1'
-        );
-        await sleep(250);
-        // Open the slider-mode dropdown and pick RGB Sliders
-        await run(
-          'tell application "System Events" to tell process "Skydimo" to tell splitter group 1 of window "Colors" to click pop up button 1'
-        );
-        await sleep(300);
-        await run(
-          'tell application "System Events" to tell process "Skydimo" to tell splitter group 1 of window "Colors" to click menu item "RGB Sliders" of menu 1 of pop up button 1'
-        );
-        await sleep(250);
-        this.rgbSlidersReady = true;
-      } catch (e) {
-        // Already on RGB Sliders or structure differs — proceed anyway
-        this.rgbSlidersReady = true;
-      }
-    }
-  }
-
-  /** Read absolute screen coordinates of the hex-input text field. */
-  async getHexFieldCenter() {
-    const posStr = await run(
-      'tell application "System Events" to tell process "Skydimo" to tell splitter group 1 of window "Colors" to return position of text field 4'
-    );
-    const sizeStr = await run(
-      'tell application "System Events" to tell process "Skydimo" to tell splitter group 1 of window "Colors" to return size of text field 4'
-    );
-    const [x, y] = posStr.split(",").map((s) => parseInt(s.trim(), 10));
-    const [w, h] = sizeStr.split(",").map((s) => parseInt(s.trim(), 10));
-    return { x: x + Math.floor(w / 2), y: y + Math.floor(h / 2) };
-  }
-
-  /** Core colour-set routine.
-   *
-   *  NSColorPanel ignores programmatic value changes (`set value of slider to N`)
-   *  — they don't fire the colour-changed event, so clicking OK re-applies the
-   *  previous colour. The only reliable path is simulated real input events:
-   *
-   *    1. Activate Skydimo so keystrokes hit the picker
-   *    2. Real mouse-click the hex field (focus)
-   *    3. Second click + third click immediately after (selects all text)
-   *    4. Keystroke the new 6-char hex value
-   *    5. Return key to commit
-   *    6. Click OK to apply and close the picker
-   */
-  async applyColor() {
-    await this.ensureSkydimoRunning();
-    const [r, g, b] = hsvToRgb(this.hue, this.saturation, 100);
-    const hex = rgbToHex(r, g, b);
-    this.log(
-      `Color HSV(${Math.round(this.hue)}, ${Math.round(this.saturation)}) -> #${hex}`
-    );
-
-    await this.ensurePickerAndRgbMode();
-    const { x, y } = await this.getHexFieldCenter();
-
-    await run('tell application "SkyDimo" to activate');
-    await sleep(450);
-
-    // Single click to focus the field
-    await run(`tell application "System Events" to click at {${x}, ${y}}`);
-    await sleep(350);
-    // Double-click to select all existing text
-    await run(`tell application "System Events" to click at {${x}, ${y}}`);
-    await run(`tell application "System Events" to click at {${x}, ${y}}`);
-    await sleep(300);
-
-    await run(`tell application "System Events" to keystroke "${hex}"`);
-    await sleep(200);
-
-    // Return (key code 36) commits the hex field
-    await run('tell application "System Events" to key code 36');
-    await sleep(400);
-
-    try {
-      await run(
-        'tell application "System Events" to click button "OK" of window "Colors" of process "Skydimo"'
-      );
-    } catch (e) {
-      /* picker already closed */
-    }
-  }
+  // ────────────────────────────────────────────────────────────────────────
+  // Homebridge boilerplate
+  // ────────────────────────────────────────────────────────────────────────
 
   getServices() {
     return [this.infoService, this.lightService];

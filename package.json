@@ -1,25 +1,24 @@
 {
   "name": "homebridge-skydimo",
-  "version": "1.0.0",
-  "description": "HomeKit plugin for Skydimo ambient monitor lights on macOS — adds on/off, brightness, and full colour wheel support so you can control Skydimo lights with Siri, the Home app, and HomeKit automations.",
+  "version": "2.0.0",
+  "description": "HomeKit plugin for Skydimo ambient monitor lights — talks to the controller directly over USB using the Adalight protocol. On/off, brightness, full colour wheel, Siri, scenes, automations. No UI automation, no screen flashing. Cross-platform.",
   "main": "index.js",
   "keywords": [
     "homebridge-plugin",
     "homekit",
     "skydimo",
+    "adalight",
     "ambient",
     "lights",
     "rgb",
-    "macos",
-    "monitor-lights"
+    "led",
+    "monitor-lights",
+    "ambilight"
   ],
   "engines": {
     "node": ">=18.0.0",
     "homebridge": ">=1.6.0"
   },
-  "os": [
-    "darwin"
-  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/martinheywebteam/homebridge-skydimo.git"
@@ -31,5 +30,8 @@
   "license": "MIT",
   "scripts": {
     "test": "echo \"No tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "serialport": "^13.0.0"
   }
 }

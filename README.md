@@ -1,8 +1,14 @@
 # homebridge-skydimo
 
-HomeKit plugin for [Skydimo](https://skydimo.com/en) ambient monitor lights — adds **on/off, brightness, and full colour-wheel support** so you can control your Skydimo lights with Siri, the Home app, scenes, and HomeKit automations.
+HomeKit plugin for [Skydimo](https://skydimo.com/en) ambient monitor lights. Talks to the controller **directly over USB** using the Adalight protocol — fast, silent, reliable.
 
-> ⚠️ **macOS only.** Because Skydimo is a USB-tethered peripheral with no public API, this plugin drives the Skydimo desktop app via macOS UI automation (AppleScript / `osascript`). The Skydimo app must be running on the same Mac as Homebridge.
+Add your Skydimo lights to the Home app, control them with Siri, include them in scenes and automations, and never touch the Skydimo desktop app again.
+
+```
+"Hey Siri, make the monitor lights purple"   ✨
+"Hey Siri, dim monitor lights to 30%"        🔅
+"Hey Siri, turn off monitor lights"          ⭘
+```
 
 ### Where to buy the lights
 
@@ -11,114 +17,76 @@ HomeKit plugin for [Skydimo](https://skydimo.com/en) ambient monitor lights — 
 
 ---
 
-## 🖥️ Recommended setup: dedicated Mac home server
-
-**This plugin is designed for a dedicated/headless Mac used as a home server**, not for your main work Mac.
-
-Here's why that matters:
-
-Every time HomeKit changes the colour, the plugin briefly activates Skydimo and flashes its colour picker window on screen (~2 seconds). On a dedicated server Mac running in clamshell mode (lid closed, tucked in a corner with an external monitor), this is completely invisible — it just works.
-
-**But on your main work Mac**, this will interrupt whatever you're doing:
-- The Skydimo app steals focus mid-typing
-- The colour picker window pops up over your other apps
-- Keystrokes get redirected to Skydimo for ~1 second
-
-### My setup (the intended use case)
-
-I run this on an old MacBook Pro that sits on a shelf as a 24/7 home server. It handles:
-- Homebridge (running this plugin + others)
-- Docker containers
-- Media server
-- File sharing
-
-The Skydimo lights are physically connected to that server Mac via USB, and the colour picker popping up there has zero impact on my work Mac — I just talk to HomeKit/Siri and the lights change.
-
-### If you don't have a spare Mac
-
-You can still use this plugin on your main Mac, but expect the occasional picker flash. Alternatives if that bothers you:
-- Use only HomeKit **scenes** with preset colours (bundle the colour change into a scene you trigger manually) — still some flashing but predictable timing
-- Accept the trade-off and only change colours when you're not actively typing
-- Wait for a future version that can talk to the lights directly over USB (contributions welcome — see [Contributing](#contributing))
-
----
-
 ## Why this exists
 
-Skydimo monitor lights are a great, affordable ambient-lighting product — but they're **not a smart home device**. They connect to a specific computer over USB and are only controllable via Skydimo's desktop app. No HomeKit, no Siri, no automations, no scenes.
+Skydimo lights are a great affordable ambient-lighting product, but the controller is meant to be driven by Skydimo's own desktop app — no HomeKit, no Siri, no automations, no integration with the rest of your smart home.
 
-This plugin bridges that gap by scripting the Skydimo desktop app through macOS accessibility APIs, so HomeKit sees the lights as a normal colour bulb.
+This plugin fixes that by talking to the controller directly using the **Adalight protocol** (as documented in [Skydimo's own open-source OpenRGB fork](https://gitlab.com/skydimo-team/skydimo-open-rgb)).
 
 ---
 
 ## Features
 
-- ✅ **On / Off** via HomeKit (maps to Skydimo's _Turn on all / Turn off all_ buttons)
-- ✅ **Brightness** 0–100% (drives the main brightness slider)
-- ✅ **Full colour wheel** — any colour the Home app picker can produce
-- ✅ **Siri support** — _"Hey Siri, set monitor lights to purple"_
-- ✅ **Scenes & automations** — sync with other lights, sunset triggers, etc.
+- ✅ **On / Off** via HomeKit (with brightness = 0 while off)
+- ✅ **Brightness** 0–100%
+- ✅ **Full colour wheel** (any hue + saturation the Home app can pick)
+- ✅ **Siri** — _"Hey Siri, make monitor lights blue"_
+- ✅ **Scenes & automations** — sync with other lights, trigger at sunset, etc.
+- ✅ **Runs silently in the background** — no app windows, no focus stealing, no colour-picker flashing
+- ✅ **Cross-platform** — works wherever Node.js + `serialport` work (macOS, Linux, Windows, Raspberry Pi, etc.)
+- ✅ **Auto-reconnect** — handles USB unplugs, port renaming, etc.
 
-### What you get
+---
 
-| HomeKit capability | Works? |
+## How it works (the short version)
+
+Skydimo LED controllers speak the **Adalight** protocol over USB serial (115200 baud, 8-N-1). Each frame is a tiny packet:
+
+```
+0x41 0x64 0x61 0x00  ← "Ada\0" magic header
+0xHH 0xLL            ← LED count (big-endian)
+R G B × LED count    ← colour bytes
+```
+
+We fill all LEDs with the same colour derived from the HomeKit state (`on`, `brightness`, `hue`, `saturation`) and send a new frame whenever HomeKit updates. A 250 ms keep-alive re-sends the frame so the controller doesn't time out.
+
+Protocol reference: [Skydimo OpenRGB → SkydimoSerialController.cpp](https://gitlab.com/skydimo-team/skydimo-open-rgb/-/blob/master/Controllers/SkydimoController/SkydimoSerialController/SkydimoSerialController.cpp)
+
+---
+
+## ⚠️ Important: Skydimo app must NOT be running
+
+The Skydimo USB controller only accepts one connection at a time. The plugin holds the port exclusively, so:
+
+- **Quit the Skydimo desktop app** before starting Homebridge
+- **Remove Skydimo from Login Items** so it doesn't auto-start
+- If you need Skydimo's screen-sync feature again, quit Homebridge (or at least this plugin) first
+
+Trade-off summary:
+
+| You want... | Use... |
 |---|---|
-| On / Off | ✅ |
-| Brightness slider | ✅ |
-| Colour wheel (hue + saturation) | ✅ |
-| Colour temperature slider | ❌ (not exposed) |
-| Adaptive Lighting | ❌ (Skydimo has no API for this) |
+| HomeKit / Siri / scenes / automations | **This plugin** |
+| Screen-sync / music-reactive / multi-mode effects | **Skydimo app** |
+| Both simultaneously | Not possible — the controller only accepts one connection |
 
 ---
 
 ## Requirements
 
-- **macOS** (tested on macOS Sequoia and Tahoe, Apple Silicon) — will not work on Linux or Raspberry Pi
-- **Skydimo desktop app** installed and running, with your device connected and in **Single color** mode
+- A Skydimo (or Skydimo-compatible, Adalight-speaking) LED controller connected via USB
 - **Node.js 18+** and **Homebridge 1.6+**
-- **Accessibility permission** granted to `osascript` (and whichever process runs Homebridge)
+- The host computer must have USB access to the controller (any Mac / Linux / Windows / Raspberry Pi works)
 
 ---
 
 ## Installation
 
-### 1. Install the plugin
-
 ```bash
 sudo npm install -g homebridge-skydimo
 ```
 
-Or if you're running Homebridge without global installs:
-
-```bash
-cd ~/.homebridge
-npm install homebridge-skydimo
-```
-
-### 2. Grant Accessibility permission
-
-This plugin simulates real mouse clicks and keystrokes on your Mac, which requires explicit user permission.
-
-Open **System Settings → Privacy & Security → Accessibility** and add:
-
-- `/usr/bin/osascript`
-- The Node.js binary that runs Homebridge (usually `/opt/homebrew/opt/node@20/bin/node` or similar — find it with `which node`)
-- Your Terminal app (if you start Homebridge from a terminal)
-
-Make sure each one is toggled **ON**.
-
-> Without these permissions the plugin will fail with errors like _"osascript is not allowed assistive access"_.
-
-### 3. Start Skydimo and configure it
-
-- Open the Skydimo desktop app
-- Connect your lights
-- Set mode to **Single color** (required — the plugin drives the colour picker in this mode)
-- Add Skydimo to **System Settings → General → Login Items** so it auto-starts
-
-### 4. Add to your Homebridge config
-
-Edit `~/.homebridge/config.json` and add the accessory:
+Then add to your Homebridge `config.json`:
 
 ```json
 {
@@ -131,91 +99,116 @@ Edit `~/.homebridge/config.json` and add the accessory:
 }
 ```
 
-Then restart Homebridge.
-
-### 5. Add to HomeKit
-
-Open the Home app on your iPhone/iPad/Mac. **Monitor Lights** should appear as a colour light bulb. You can rename it, move it to a room, and include it in scenes and automations.
+Quit the Skydimo desktop app, restart Homebridge, and **Monitor Lights** will appear in the Home app as a full-colour light bulb.
 
 ---
 
-## How it works (technical)
+## Configuration
 
-Skydimo provides no API, so every action is performed by scripting the app's UI:
+All fields are optional — sensible defaults are provided.
 
-| Action | Mechanism |
+```json
+{
+  "accessory": "SkydimoLight",
+  "name": "Monitor Lights",
+  "portPath": "/dev/cu.usbserial-1120",
+  "baudRate": 115200,
+  "numLeds": 71,
+  "keepAliveMs": 250
+}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `name` | `"Monitor Lights"` | Name shown in the Home app |
+| `portPath` | _(auto-detect)_ | Absolute serial-port path. Auto-detected on macOS/Linux for common USB-serial chips (CH340, FTDI, CP210x). Set manually if auto-detect fails. |
+| `baudRate` | `115200` | Standard for all Skydimo devices |
+| `numLeds` | `71` | LED count for your specific strip. Defaults match SK0134. See [LED counts](#led-counts-by-model) below. |
+| `keepAliveMs` | `250` | How often to re-send the current frame. Lower = less chance of controller timeout, higher = less USB traffic. |
+
+### LED counts by model
+
+Pull these from Skydimo's own config ([SKController.json](https://gitlab.com/skydimo-team/skydimo-open-rgb) or their desktop app):
+
+| Model | LEDs |
 |---|---|
-| On / Off | Click `Turn on all` / `Turn off all` button in the main window |
-| Brightness | Set the value of the brightness slider directly |
-| Colour | Open the colour picker, switch to **RGB Sliders** mode, type the target hex into the hex field, press Return, click OK |
+| SK0121 | 51 |
+| SK0124 | 54 |
+| SK0127 | 65 |
+| SK0132 | 77 |
+| **SK0134** | **71** |
+| SK0149 | 107 |
+| SK0201 | 40 |
+| SK0204 | 50 |
+| SK0L34 | 112 |
+| SK0410 | 290 |
 
-### Why colour is the tricky bit
+If your model isn't listed, check the controller config in the Skydimo app or tweak `numLeds` until all LEDs respond.
 
-macOS's `NSColorPanel` (the native colour picker) **ignores programmatic value changes**. If you `set value of slider "Red" to 255` via AppleScript, the slider moves visually but the internal colour state doesn't update — so clicking OK re-applies the previous colour.
+---
 
-The only reliable path is to simulate **real user input events** (real mouse clicks and real keystrokes). The plugin:
+## Finding your serial port (if auto-detect fails)
 
-1. Activates Skydimo so keystrokes land in the picker
-2. Uses `click at {x, y}` to generate a real mouse event on the hex field
-3. Follows with a rapid double-click at the same point to select-all the existing text
-4. Sends the new 6-character hex via `keystroke`
-5. Presses Return (`key code 36`) to commit
-6. Clicks **OK** to apply the colour
+**macOS / Linux:**
+```bash
+ls /dev/cu.usbserial-*
+# or
+ls /dev/tty.usbserial-*
+```
 
-Each colour change takes ~2 seconds. The Skydimo app window will briefly flash as the picker opens and closes — this is normal.
+**Linux (typical):**
+```bash
+ls /dev/ttyUSB*
+```
+
+**Windows:**
+Check Device Manager → Ports (COM & LPT). Use something like `"COM3"`.
+
+Set the result as `portPath` in your config.
 
 ---
 
 ## Troubleshooting
 
-### "Skydimo is not responding"
-If the Skydimo app freezes, force-quit it (⌘+⌥+Esc), unplug and reconnect the USB cable, and reopen.
+### Lights don't respond / Homebridge logs "No USB serial port found"
+- Make sure the Skydimo desktop app is fully quit (check menu bar too)
+- Replug the USB cable
+- Restart Homebridge
+- On macOS, check `ls /dev/cu.usbserial-*` — if empty, the controller isn't detected by the OS
 
-### Colours are wrong / look yellowish
-Open the Skydimo app manually. Use **Pick color** and set an RGB value (e.g. `255, 0, 0` for pure red). If the physical light also looks wrong, the issue is the LED hardware, not this plugin — adjust the colour in the Home app accordingly.
+### Colours look wrong (orange shows as yellow, etc.)
+Cheap RGB LEDs sometimes have uneven channel intensity. If you want correction, fork the repo and tweak `scaleBrightness`/`hsvToRgb` to scale the green channel down (e.g. `g * 0.7`).
 
-If colours look right when you set them manually but wrong when set via HomeKit, check that Skydimo is in **Single color** mode (not Screen Sync / Music / Colorful).
+### Only some LEDs light up
+Your `numLeds` is probably wrong. Increase until all LEDs respond. Too high is fine — extra bytes are ignored.
 
-### "osascript is not allowed assistive access"
-Re-grant Accessibility permission to `osascript` and to the Node binary that runs Homebridge. See [Installation § 2](#2-grant-accessibility-permission).
+### Lights flicker or freeze
+Lower `keepAliveMs` to `150`. If that doesn't help, your USB cable or adapter might be flaky — try a different one.
 
-### Colour picker flashes on screen every time
-That's expected — the plugin opens the picker, updates values, and closes it on every colour change. Unfortunately it's unavoidable without a real Skydimo API.
-
-### I have multiple Skydimo devices
-Current version controls all devices together (like Skydimo's "Turn on all" button). Per-device control would require further work.
-
----
-
-## Known limitations
-
-- **Not a silent background process** — the Skydimo colour picker window briefly flashes on screen during colour changes
-- **Skydimo must be the frontmost app** during colour changes (the plugin temporarily steals focus for ~1 second)
-- **Single-computer only** — the Skydimo app needs to be running on the same Mac as Homebridge
-- **Breaks if the Skydimo app UI changes** — if a future Skydimo update renames the `Turn on all` button or restructures the colour picker, the plugin will need updating
+### I want the Skydimo screen-sync feature back
+Stop Homebridge (or disable just this plugin), then launch the Skydimo desktop app.
 
 ---
 
 ## Contributing
 
-PRs and issues welcome. This plugin was reverse-engineered by poking at the Skydimo app's accessibility tree and figuring out what worked. If you find a better path — especially a way to bypass the colour-picker window entirely (direct USB protocol?) — please open an issue.
+PRs very welcome. Ideas:
 
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+- Support multiple simultaneous Skydimo devices per host
+- Expose colour-temperature slider (WW/CW mix)
+- Per-LED addressing (for future effects/ambient modes)
+- Screen-sync implementation in JS/Node so we don't need to choose between HomeKit and ambilight
 
 ---
 
 ## Credits
 
-- Built for personal use and released in case it helps someone else
-- No affiliation with Skydimo or Homebridge
-- Inspired by countless hours of reverse engineering the Skydimo UI 🎨
+Protocol and LED-config data come from Skydimo's own open-source [OpenRGB fork](https://gitlab.com/skydimo-team/skydimo-open-rgb) (GPL-2.0) — huge thanks to the Skydimo team for open-sourcing it.
+
+This plugin itself is independent community work, MIT-licensed. No affiliation with Skydimo or Homebridge.
 
 ---
 
-## Disclaimer
+## Licence
 
-This plugin is a community project. "Skydimo" is a trademark of its respective owner. Use at your own risk — it works for me but may break at any time if Skydimo updates their app.
+[MIT](LICENSE)
