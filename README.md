@@ -11,6 +11,38 @@ HomeKit plugin for [Skydimo](https://skydimo.com/en) ambient monitor lights — 
 
 ---
 
+## 🖥️ Recommended setup: dedicated Mac home server
+
+**This plugin is designed for a dedicated/headless Mac used as a home server**, not for your main work Mac.
+
+Here's why that matters:
+
+Every time HomeKit changes the colour, the plugin briefly activates Skydimo and flashes its colour picker window on screen (~2 seconds). On a dedicated server Mac running in clamshell mode (lid closed, tucked in a corner with an external monitor), this is completely invisible — it just works.
+
+**But on your main work Mac**, this will interrupt whatever you're doing:
+- The Skydimo app steals focus mid-typing
+- The colour picker window pops up over your other apps
+- Keystrokes get redirected to Skydimo for ~1 second
+
+### My setup (the intended use case)
+
+I run this on an old MacBook Pro that sits on a shelf as a 24/7 home server. It handles:
+- Homebridge (running this plugin + others)
+- Docker containers
+- Media server
+- File sharing
+
+The Skydimo lights are physically connected to that server Mac via USB, and the colour picker popping up there has zero impact on my work Mac — I just talk to HomeKit/Siri and the lights change.
+
+### If you don't have a spare Mac
+
+You can still use this plugin on your main Mac, but expect the occasional picker flash. Alternatives if that bothers you:
+- Use only HomeKit **scenes** with preset colours (bundle the colour change into a scene you trigger manually) — still some flashing but predictable timing
+- Accept the trade-off and only change colours when you're not actively typing
+- Wait for a future version that can talk to the lights directly over USB (contributions welcome — see [Contributing](#contributing))
+
+---
+
 ## Why this exists
 
 Skydimo monitor lights are a great, affordable ambient-lighting product — but they're **not a smart home device**. They connect to a specific computer over USB and are only controllable via Skydimo's desktop app. No HomeKit, no Siri, no automations, no scenes.
