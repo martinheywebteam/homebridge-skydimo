@@ -4,6 +4,11 @@ HomeKit plugin for [Skydimo](https://skydimo.com/en) ambient monitor lights — 
 
 > ⚠️ **macOS only.** Because Skydimo is a USB-tethered peripheral with no public API, this plugin drives the Skydimo desktop app via macOS UI automation (AppleScript / `osascript`). The Skydimo app must be running on the same Mac as Homebridge.
 
+### Where to buy the lights
+
+- **Official site:** [skydimo.com](https://skydimo.com/en)
+- **Temu (affordable alternative):** [share.temu.com/4uuaz6YYtKB](https://share.temu.com/4uuaz6YYtKB) — same hardware, tested with this plugin ✅
+
 ---
 
 ## Why this exists
