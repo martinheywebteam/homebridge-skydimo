@@ -143,13 +143,24 @@ class SkydimoLight {
         /Silicon Labs|FTDI|QinHeng|CH340/i.test(
           `${p.manufacturer || ""} ${p.vendorId || ""}`
         );
-      // Prefer macOS /dev/cu.* (call-up) over /dev/tty.* for outgoing comms
       const candidate =
         ports.find((p) => match(p) && /^\/dev\/cu\./.test(p.path)) ||
         ports.find(match);
       if (candidate) {
-        this.log(`Auto-detected serial port: ${candidate.path}`);
-        return candidate.path;
+        // On macOS, serialport often only lists /dev/tty.* — but /dev/cu.*
+        // is the preferred path. Swap if the cu.* sibling exists.
+        let resolved = candidate.path;
+        if (/^\/dev\/tty\./.test(resolved)) {
+          const fs = require("fs");
+          const cuPath = resolved.replace("/dev/tty.", "/dev/cu.");
+          try {
+            if (fs.existsSync(cuPath)) resolved = cuPath;
+          } catch (e) {
+            /* ignore */
+          }
+        }
+        this.log(`Auto-detected serial port: ${resolved}`);
+        return resolved;
       }
     } catch (e) {
       this.log.error("Port enumeration failed:", e.message);
