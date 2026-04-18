@@ -138,14 +138,15 @@ class SkydimoLight {
     if (this.portPath) return this.portPath;
     try {
       const ports = await SerialPort.list();
-      // Look for usbserial-* (CH340 etc.) — Skydimo uses generic USB-serial chips
-      const candidate = ports.find(
-        (p) =>
-          /usbserial|wchusbserial|cu\.usbserial/i.test(p.path) ||
-          /Silicon Labs|FTDI|QinHeng|CH340/i.test(
-            `${p.manufacturer || ""} ${p.vendorId || ""}`
-          )
-      );
+      const match = (p) =>
+        /usbserial|wchusbserial/i.test(p.path) ||
+        /Silicon Labs|FTDI|QinHeng|CH340/i.test(
+          `${p.manufacturer || ""} ${p.vendorId || ""}`
+        );
+      // Prefer macOS /dev/cu.* (call-up) over /dev/tty.* for outgoing comms
+      const candidate =
+        ports.find((p) => match(p) && /^\/dev\/cu\./.test(p.path)) ||
+        ports.find(match);
       if (candidate) {
         this.log(`Auto-detected serial port: ${candidate.path}`);
         return candidate.path;
