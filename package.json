@@ -1,0 +1,35 @@
+{
+  "name": "homebridge-skydimo",
+  "version": "1.0.0",
+  "description": "HomeKit plugin for Skydimo ambient monitor lights on macOS — adds on/off, brightness, and full colour wheel support so you can control Skydimo lights with Siri, the Home app, and HomeKit automations.",
+  "main": "index.js",
+  "keywords": [
+    "homebridge-plugin",
+    "homekit",
+    "skydimo",
+    "ambient",
+    "lights",
+    "rgb",
+    "macos",
+    "monitor-lights"
+  ],
+  "engines": {
+    "node": ">=18.0.0",
+    "homebridge": ">=1.6.0"
+  },
+  "os": [
+    "darwin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/martinheywebteam/homebridge-skydimo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/martinheywebteam/homebridge-skydimo/issues"
+  },
+  "homepage": "https://github.com/martinheywebteam/homebridge-skydimo#readme",
+  "license": "MIT",
+  "scripts": {
+    "test": "echo \"No tests yet\" && exit 0"
+  }
+}
